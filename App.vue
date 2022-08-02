@@ -2,6 +2,8 @@
   <div>
     <label>
       <b>说明：1. 左键画点，右键闭合多边形(点数>2); 2. 左键可以点选多边形，每次只能选中一个; 3. 画完一个多边形后，自动切换到选取图元状态; 4. 支持滚轮缩放
+      <br />
+      注意："加载选区"必须在所有绘图操作之前执行，并且只能执行一次，否则会导致绘图操作的undo和redo混乱；undo和redo仅针对"绘制多边形"操作，删除操作无法撤销。
       </b>
     </label><br />
     辅助函数：<button id="setBackgroundImage" title="更换背景图片" @click="setBackgroundImage('tulips.jpg')">更换背景图片</button>
@@ -14,6 +16,9 @@
     <button id="selectObj" title="选取图元" @click="selectObj">选取图元</button>
     <button id="deleteObj" title="删除选中图元" @click="deleteObj">删除选中图元</button>
     <button id="drawPolygon" title="绘制多边形" @click="drawPolygon">绘制多边形</button>
+    <button id="undo" title="后退" @click="undo()">后退</button>
+    <button id="redo" title="前进" @click="redo()">前进</button>
+    <br /><br />
     <canvas id="canvas" class="canvas" width="512" height="512"></canvas>
   </div>
 </template>
@@ -25,6 +30,7 @@ export default {
       canvas: null,
       id: 0, //多边形编号，从0开始自动递增
       history: [], //历史记录，形如{"x":1,"y":1,"button":1,"id":0}
+      currIndex: -1, //最新操作的history下标，undo和redo会用到 
       lines: [], //当前未闭合多边形的Line对象数组
       operation: "", //当前操作名称，目前只有polygon，为空表示选择
       coordinate: [] //坐标数组，每个元素是个json数组，代表一个多边形
@@ -61,7 +67,6 @@ export default {
       //重算坐标
       this.coordinate = [];
       this.canvas.getObjects().forEach((item) => {
-        //console.log(item);
         //可能有未完成的多边形（线段），这里需要判断
         if (item.type == "polygon") {
           this.coordinate.push(item.points);
@@ -80,6 +85,128 @@ export default {
         item.evented = false;
       });
     },
+    //后退
+    undo() {
+      if (this.currIndex < 0)
+        return;
+
+      let op = this.history[this.currIndex];
+      if (op.button == 1) {
+        //回退左键操作
+        this.currIndex--;
+        //删掉最后一根线
+        let obj = this.lines.pop();
+        this.canvas.remove(obj);
+        this.canvas.requestRenderAll();
+
+        //切换到绘图状态
+        this.drawPolygon();
+      }
+      else if (op.button == 3) {
+        //回退右键操作
+        this.currIndex--;
+
+        //删掉最后一个多边形
+        let obj = null;
+        this.canvas.getObjects().forEach((item) => {
+          if (item.type == "polygon") {
+            obj = item;
+          }
+        });
+        if (obj != null) {
+          this.canvas.remove(obj);
+        }
+        //删掉最后一个多边形坐标
+        this.coordinate.pop();
+
+        //修改多边形id
+        this.id = op.id;
+
+        //重新构建lines
+        this.lines = [];
+        let x1 = -1;
+        let y1 = -1;
+        this.history.forEach((v) => {
+          if (v.button == 1 && v.id == this.id) {
+            //第一个点不用画线
+            if (x1 >= 0 && y1 >= 0) {              
+              this.addLine([x1,y1,v.x,v.y]);              
+            }
+            x1 = v.x;
+            y1 = v.y;            
+          }
+        });
+
+        //补最后一条线(终点)
+        this.addLine([x1,y1,x1,y1]);
+
+        this.canvas.requestRenderAll();
+
+        //切换到绘图状态
+        this.drawPolygon();
+      }
+    },
+    //前进
+    redo() {
+      if (this.currIndex >= this.history.length - 1)
+        return;
+
+      //说明前面撤销到初始状态了，这里单独处理
+      if (this.currIndex < 0) {
+        //从头开始
+        this.currIndex = 0;
+        let op = this.history[this.currIndex];
+
+        //补最后一条线(终点)
+        this.addLine([op.x,op.y,op.x,op.y]);
+
+        this.canvas.requestRenderAll();
+
+        //切换到绘图状态
+        this.drawPolygon();        
+        return;
+      }
+
+      //当前位置
+      let x1 = this.history[this.currIndex].x;
+      let y1 = this.history[this.currIndex].y;
+      let id1 = this.history[this.currIndex].id;
+
+      let op = this.history[this.currIndex + 1];
+      if (op.button == 1) {
+        //前进左键操作
+        this.currIndex++;
+
+        //删掉最后一根线
+        let obj = this.lines.pop();
+        this.canvas.remove(obj);
+
+        //先补一条线，如果是新多边形的第一点则忽略
+        if (id1 == op.id) {
+          this.addLine([x1,y1,op.x,op.y]);
+        }
+        
+        //补最后一条线(终点)
+        this.addLine([op.x,op.y,op.x,op.y]);
+
+        this.canvas.requestRenderAll();
+
+        //切换到绘图状态
+        this.drawPolygon();
+      }
+      else if (op.button == 3) {
+        //前进右键操作
+        this.currIndex++;
+
+        //修改多边形id
+        this.id = op.id;
+
+        //关闭多边形
+        this.closePolygon();
+
+        this.canvas.requestRenderAll();
+      }
+    },
     //更换背景图片
     setBackgroundImage(imgPath) {
       this.canvas.setBackgroundImage(
@@ -88,34 +215,11 @@ export default {
       )
     },
     //加载选区
-    loadPolygons(arr) {
-      arr.forEach((item) => {
-        let left = item[0].x;
-        let top = item[0].y;
-        item.forEach((v) => { 
-          if (v.x < left) left = v.x;
-          if (v.y < top) top = v.y;
-        })
-        //console.log(item);
-        let poly = new fabric.Polygon(item, {
-          fill: "rgba(255,0,0,0.1)",
-          strokeWidth: 1,
-          stroke: "red",
-          left: left,
-          top: top,
-          cornerStyle: "circle",
-          cornerColor: "rgba(0,0,255,1)",
-          centeredRotation: false,
-          centeredScaling: false,
-          hasControls: false,
-          lockMovementX: true,
-          lockMovementY: true
-        });
-        this.coordinate.push(item);
-        this.canvas.add(poly);
-        //console.log(poly);
-        this.canvas.requestRenderAll();
-      });      
+    loadPolygons(polygons) {
+      polygons.forEach((points) => {
+        this.addPolygon(points);
+      });
+      this.canvas.requestRenderAll();
     },
     //放大
     zoomIn(scale) {
@@ -152,29 +256,28 @@ export default {
             
           //记录鼠标历史操作
           if (this.operation == "polygon") {
-            this.history.push({"x":x, "y":y, "button":e.button, "id":this.id});
+            this.currIndex++;
+            //清理历史记录，如果当前位置后面还有元素，先清空
+            if (this.currIndex < this.history.length) {
+              this.history.splice(this.currIndex, this.history.length - this.currIndex);
+            }
+            //记录最新操作
+            this.history.push({"x":x, "y":y, "button":e.button, "id":this.id});            
           }
 
           //左键处理
           if (e.button == 1) {
             //如果正在绘制多边形
             if (this.operation == "polygon") {
-              let points = [x,y,x,y];
-              //生成两个端点重合的线段，move的时候再修改终点
-              let line = new fabric.Line(points, {
-                  strokeWidth: 1,
-                  selectable: false,
-                  stroke: "red"
-              });
-              this.lines.push(line);
-              this.canvas.add(line);
-              this.canvas.renderAll();
+              this.addLine([x,y,x,y]);
+              this.canvas.requestRenderAll();
             }
           }
           else if (e.button == 3) { //右键处理
             //如果正在绘制多边形，且点数大于2的时候，结束绘制
-            if (this.operation == "polygon" && this.lines.length > 2)
+            if (this.operation == "polygon" && this.lines.length > 2) {
               this.closePolygon();
+            }
           }
         },
         "mouse:wheel":  e => {
@@ -196,7 +299,7 @@ export default {
           let y = Math.round(e.pointer.y / this.canvas.getZoom());
           if (this.lines.length > 0 && this.operation == "polygon") {
             this.lines[this.lines.length - 1].set({x2:x, y2:y});
-            this.canvas.renderAll();
+            this.canvas.requestRenderAll();
           }
         }
       });
@@ -221,6 +324,25 @@ export default {
       //id自增
       this.id++;
 
+      this.addPolygon(points);
+
+      this.canvas.requestRenderAll();
+      
+      //画完一个就退出绘图状态
+      this.selectObj();
+    },
+    //新增一条线
+    addLine(points) {
+      let line = new fabric.Line(points, {
+        strokeWidth: 1,
+        selectable: false,
+        stroke: "red"
+      });
+      this.lines.push(line);
+      this.canvas.add(line);
+    },
+    //新增一个多边形
+    addPolygon(points) {
       let left = points[0].x;
       let top = points[0].y;
       points.forEach((v) => {
@@ -245,10 +367,6 @@ export default {
 
       this.coordinate.push(points);
       this.canvas.add(poly);
-      this.canvas.requestRenderAll();
-      
-      //画完一个就退出绘图状态
-      this.selectObj();
     }
   }
 };
